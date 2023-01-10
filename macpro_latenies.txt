@@ -1,0 +1,1 @@
+{"efficientnet-b0": 0.7637045, "efficientnet-b1": 1.06251856, "efficientnet-b2": 1.2049833800000003, "efficientnet-b3": 1.6186704200000002, "efficientnet-b4": 2.5901558, "efficientnet-b5": 3.6779520000000003, "efficientnet-b6": 5.21970912, "efficientnet-b7": 7.333417659999998}
