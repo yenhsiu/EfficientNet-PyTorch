@@ -43,5 +43,5 @@ for m in model_names:
 
     # as requested in comment
 
-    with open('macpro_latenies.txt', 'w') as file:
+    with open('vodka_latenies.txt', 'w') as file:
         file.write(json.dumps(model_latencies_dict))
