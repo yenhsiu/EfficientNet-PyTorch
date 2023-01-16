@@ -25,6 +25,183 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 
 from efficientnet_pytorch import EfficientNet
+class SwishImplementation(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, i):
+        result = i * torch.sigmoid(i)
+        ctx.save_for_backward(i)
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        i = ctx.saved_tensors[0]
+        sigmoid_i = torch.sigmoid(i)
+        return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
+class Tailmodel(nn.Module):
+    def __init__(self,student_efficientnet=EfficientNet.from_pretrained('efficientnet-b7')):
+        super().__init__()
+#         self._swish = MemoryEfficientSwish()
+        self._blocks = student_efficientnet._blocks[11:] #reduction2
+        self._conv_head = student_efficientnet._conv_head
+        self._bn1 = student_efficientnet._bn1
+        self._avg_pooling = student_efficientnet._avg_pooling
+        self._dropout = student_efficientnet._dropout
+        self._fc = student_efficientnet._fc
+        self._swish = student_efficientnet._swish
+
+    def set_swish(self, memory_efficient=True):
+        """Sets swish function as memory efficient (for training) or standard (for export).
+
+        Args:
+            memory_efficient (bool): Whether to use memory-efficient version of swish.
+        """
+        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
+        for block in self._blocks:
+            block.set_swish(memory_efficient)
+            
+    def extract_features(self, x):
+        """use convolution layer to extract feature .
+
+        Args:
+            inputs (tensor): Input tensor.
+
+        Returns:
+            Output of the final convolution
+            layer in the efficientnet model.
+        """
+        # Blocks
+        for idx, block in enumerate(self._blocks):
+            drop_connect_rate = 0.2
+            if drop_connect_rate:
+                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
+            x = block(x, drop_connect_rate=drop_connect_rate)
+            
+        # Head
+        x = self._swish(self._bn1(self._conv_head(x)))
+        return x
+    
+    def forward(self, inputs):
+        """EfficientNet's forward function.
+           Calls extract_features to extract features, applies final linear layer, and returns logits.
+
+        Args:
+            inputs (tensor): Input tensor.
+
+        Returns:
+            Output of this model after processing.
+        """
+        # Convolution layers
+        x = self.extract_features(inputs)
+        # Pooling and final linear layer
+        x = self._avg_pooling(x)
+#         if self._global_params.include_top:
+        x = x.flatten(start_dim=1)
+        x = self._dropout(x)
+        x = self._fc(x)
+        return x
+class MemoryEfficientSwish(nn.Module):
+    def forward(self, x):
+        return SwishImplementation.apply(x)
+class teacher_Headmodel(nn.Module):
+    def __init__(self,student_efficientnet=EfficientNet.from_pretrained('efficientnet-b7')):
+        super().__init__()
+        self._conv_stem = student_efficientnet._conv_stem
+        self._conv_stem.requires_grad = False
+        self._bn0 = student_efficientnet._bn0
+        self._swish = MemoryEfficientSwish()
+        self._blocks = student_efficientnet._blocks[:11]   
+    def set_swish(self, memory_efficient=True):
+        """Sets swish function as memory efficient (for training) or standard (for export).
+
+        Args:
+            memory_efficient (bool): Whether to use memory-efficient version of swish.
+        """
+        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
+        for block in self._blocks:
+            block.set_swish(memory_efficient)
+            
+    def extract_features(self, inputs):
+        """use convolution layer to extract feature .
+
+        Args:
+            inputs (tensor): Input tensor.
+
+        Returns:
+            Output of the final convolution
+            layer in the efficientnet model.
+        """
+        # Stem
+        x = self._swish(self._bn0(self._conv_stem(inputs)))
+
+        # Blocks
+        for idx, block in enumerate(self._blocks):
+            drop_connect_rate = 0.2
+            if drop_connect_rate:
+                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
+            x = block(x, drop_connect_rate=drop_connect_rate)
+
+        # print(x.shape) #torch.Size([1, 48, 150, 150]
+        return x
+       
+class Headmodel(nn.Module):
+    def __init__(self,student_efficientnet=EfficientNet.from_name('efficientnet-b0')):
+        super().__init__()
+        self.image_size = 600
+        self._conv_stem = student_efficientnet._conv_stem
+        self._conv_stem.requires_grad = False
+        self._bn0 = student_efficientnet._bn0
+        self._swish = MemoryEfficientSwish()
+        self._blocks = student_efficientnet._blocks[:2]
+        self.connect = nn.Conv2d(in_channels=24, out_channels=48, kernel_size=1, stride=1, padding=0)
+        
+    def set_swish(self, memory_efficient=True):
+        """Sets swish function as memory efficient (for training) or standard (for export).
+
+        Args:
+            memory_efficient (bool): Whether to use memory-efficient version of swish.
+        """
+        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
+        for block in self._blocks:
+            block.set_swish(memory_efficient)
+            
+    def extract_features(self, inputs):
+        """use convolution layer to extract feature .
+
+        Args:
+            inputs (tensor): Input tensor.
+
+        Returns:
+            Output of the final convolution
+            layer in the efficientnet model.
+        """
+        # Stem
+        x = self._swish(self._bn0(self._conv_stem(inputs)))
+
+        # Blocks
+        for idx, block in enumerate(self._blocks):
+            drop_connect_rate = 0.2
+            if drop_connect_rate:
+                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
+            x = block(x, drop_connect_rate=drop_connect_rate)
+#         print(x.shape) #[1, 24, 56, 56]
+        x = self.connect(x)
+        # x = x.repeat(1,1,2,2)
+        # x = x[:,:,:150,:150]
+        return x
+    
+    def forward(self, inputs):
+        """EfficientNet's forward function.
+           Calls extract_features to extract features, applies final linear layer, and returns logits.
+
+        Args:
+            inputs (tensor): Input tensor.
+
+        Returns:
+            Output of this model after processing.
+        """
+        # Convolution layers
+        x = self.extract_features(inputs)
+        return x
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -69,7 +246,7 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
-parser.add_argument('--image_size', default=224, type=int,
+parser.add_argument('--image_size', default=600, type=int,
                     help='image size')
 parser.add_argument('--advprop', default=False, action='store_true',
                     help='use advprop or not')
@@ -78,8 +255,6 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
-parser.add_argument('--splitnet', default='', type=str, metavar='Arc',
-                    help='model name to distill')
 best_acc1 = 0
 
 
@@ -142,8 +317,10 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             print("=> creating model '{}'".format(args.arch))
             model = EfficientNet.from_name(args.arch)
-            if args.splitnet:
 
+    if "head" in args.arch:
+        model = Headmodel()
+        image_size = 600
     else:
         if args.pretrained:
             print("=> using pre-trained model '{}'".format(args.arch))
@@ -182,7 +359,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    criterion = nn.MSELoss().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -295,19 +472,24 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     # switch to train mode
     model.train()
-
+    t = teacher_Headmodel()
+    t.eval()
+    tailnet = Tailmodel()
+    tailnet.eval()
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
+        head_target = t.extract_features(images)
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
+        head_target = head_target.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(images)
-        loss = criterion(output, target)
+        loss = criterion(output, head_target)
+        output = tailnet(output)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
