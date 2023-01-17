@@ -23,6 +23,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from PIL import Image
 
 from efficientnet_pytorch import EfficientNet
 class SwishImplementation(torch.autograd.Function):
@@ -202,6 +203,121 @@ class Headmodel(nn.Module):
         # Convolution layers
         x = self.extract_features(inputs)
         return x
+
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+
+
+import os
+from torchvision.io import read_image
+IMG_EXTENSIONS = [
+    '.jpg', '.JPG', '.jpeg', '.JPEG',
+    '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
+]
+
+
+def is_image_file(filename):
+    return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
+
+
+def find_classes(dir):
+    classes = [d for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
+    classes.sort()
+    class_to_idx = {classes[i]: i for i in range(len(classes))}
+    return classes, class_to_idx
+
+
+def make_dataset(dir, class_to_idx):
+    images = []
+    dir = os.path.expanduser(dir)
+    for target in sorted(os.listdir(dir)):
+        d = os.path.join(dir, target)
+        if not os.path.isdir(d):
+            continue
+
+        for root, _, fnames in sorted(os.walk(d)):
+            for fname in sorted(fnames):
+                if is_image_file(fname):
+                    path = os.path.join(root, fname)
+                    item = (path, class_to_idx[target])
+                    images.append(item)
+
+    return images
+
+
+def pil_loader(path):
+    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
+    with open(path, 'rb') as f:
+        with Image.open(f) as img:
+            return img.convert('RGB')
+
+
+def accimage_loader(path):
+    import accimage
+    try:
+        return accimage.Image(path)
+    except IOError:
+        # Potentially a decoding problem, fall back to PIL.Image
+        return pil_loader(path)
+
+
+def default_loader(path):
+    from torchvision import get_image_backend
+    if get_image_backend() == 'accimage':
+        return accimage_loader(path)
+    else:
+        return pil_loader(path)
+
+
+
+class KDImageDataset(datasets.ImageFolder):
+    def __init__(self, root, transform=None, target_transform=None,
+                 loader=default_loader):
+        classes, class_to_idx = find_classes(root)
+        imgs = make_dataset(root, class_to_idx)
+        if len(imgs) == 0:
+            raise(RuntimeError("Found 0 images in subfolders of: " + root + "\n"
+                               "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
+    
+        super().__init__(root)
+        self.root = root
+        self.imgs = imgs
+        self.classes = classes
+        self.class_to_idx = class_to_idx
+        self.transform = transform
+        self.loader = loader
+        self.targets = self.tensor_target()
+        self.target_transform = target_transform
+
+    def tensor_target(self):
+        imgs = self.imgs
+        targets = []
+        for i in imgs:
+            pth = i[0]
+            a = pth.find('train')
+            pth = pth[:a-1]+"_KD"+pth[a-1:-5]+'.pt'
+            targets.append(torch.load(pth))
+        self.targets = targets
+        return targets
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is class_index of the target class.
+        """
+        path, target = self.imgs[index]
+        img = self.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is None:
+            a = path.find('train')
+            path = path[:a-1]+"_KD"+path[a-1:-5]+'.pt'
+            
+        return (img, path)
+
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -397,10 +513,10 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         image_size = args.image_size
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose([
-            transforms.RandomResizedCrop(image_size),
+    train_dataset = KDImageDataset(
+        root=traindir,
+        transform =transforms.Compose([
+            transforms.RandomResizedCrop(600),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -474,18 +590,27 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     t = teacher_Headmodel()
     t.eval()
     end = time.time()
+    
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
-        head_target = t.extract_features(images)
+        # head_target = t.extract_features(images)
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-        head_target = head_target.cuda(args.gpu, non_blocking=True)
+        target_one = True
+        for target_pth in target:
+            if target_one:
+                target_tensor = torch.load(target_pth).unsqueeze(0)
+                target_one = False
+            else:
+                target_tensor = torch.cat((target_tensor, torch.load(target_pth).unsqueeze(0)), dim=0)
+    
+        target = target_tensor.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(images)
-        loss = criterion(output, head_target)
+        loss = criterion(output, target)
         # output = tailnet(output)
 
         # measure accuracy and record loss

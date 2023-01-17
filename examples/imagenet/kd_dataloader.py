@@ -87,19 +87,8 @@ class KDImageDataset(datasets.ImageFolder):
         self.class_to_idx = class_to_idx
         self.transform = transform
         self.loader = loader
-        self.targets = self.tensor_target()
-        self.target_transform = target_transform
-
-    def tensor_target(self):
-        imgs = self.imgs
-        targets = []
-        for i in imgs:
-            pth = i[0]
-            a = pth.find('train')
-            pth = pth[:a-1]+"_KD"+pth[a-1:-5]+'.pt'
-            targets.append(torch.load(pth))
-        self.targets = targets
-        return targets
+        self.tensorpath = ""
+        self.target_transform = torch.load(self.tensorpath)
 
     def __getitem__(self, index):
         """
@@ -113,11 +102,12 @@ class KDImageDataset(datasets.ImageFolder):
         img = self.loader(path)
         if self.transform is not None:
             img = self.transform(img)
-        if self.target_transform is None:
-            a = path.find('train')
-            path = path[:a-1]+"_KD"+path[a-1:-5]+'.pt'
-            
-        return img, path
+        a = path.find('train')
+        self.tensorpath = path[:a-1]+"_KD"+path[a-1:-5]+'.pt' 
+        target = self.target_transform(path)
+        return (img, target)
+
+    
 
 train_dataset = KDImageDataset(
         root="/home/yenhsiu/dataset/KDdataset/train",
@@ -136,5 +126,5 @@ train_loader =  torch.utils.data.DataLoader(
 
 
 for i, (images, target) in enumerate(train_loader):
-    print(i, target)
+    print(i,images, target)
     
