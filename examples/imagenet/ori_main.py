@@ -23,299 +23,8 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
-from PIL import Image
 
 from efficientnet_pytorch import EfficientNet
-class SwishImplementation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, i):
-        result = i * torch.sigmoid(i)
-        ctx.save_for_backward(i)
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        i = ctx.saved_tensors[0]
-        sigmoid_i = torch.sigmoid(i)
-        return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
-class Tailmodel(nn.Module):
-    def __init__(self,student_efficientnet=EfficientNet.from_pretrained('efficientnet-b7')):
-        super().__init__()
-#         self._swish = MemoryEfficientSwish()
-        self._blocks = student_efficientnet._blocks[11:] #reduction2
-        self._conv_head = student_efficientnet._conv_head
-        self._bn1 = student_efficientnet._bn1
-        self._avg_pooling = student_efficientnet._avg_pooling
-        self._dropout = student_efficientnet._dropout
-        self._fc = student_efficientnet._fc
-        self._swish = student_efficientnet._swish
-
-    def set_swish(self, memory_efficient=True):
-        """Sets swish function as memory efficient (for training) or standard (for export).
-
-        Args:
-            memory_efficient (bool): Whether to use memory-efficient version of swish.
-        """
-        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
-        for block in self._blocks:
-            block.set_swish(memory_efficient)
-            
-    def extract_features(self, x):
-        """use convolution layer to extract feature .
-
-        Args:
-            inputs (tensor): Input tensor.
-
-        Returns:
-            Output of the final convolution
-            layer in the efficientnet model.
-        """
-        # Blocks
-        for idx, block in enumerate(self._blocks):
-            drop_connect_rate = 0.2
-            if drop_connect_rate:
-                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
-            x = block(x, drop_connect_rate=drop_connect_rate)
-            
-        # Head
-        x = self._swish(self._bn1(self._conv_head(x)))
-        return x
-    
-    def forward(self, inputs):
-        """EfficientNet's forward function.
-           Calls extract_features to extract features, applies final linear layer, and returns logits.
-
-        Args:
-            inputs (tensor): Input tensor.
-
-        Returns:
-            Output of this model after processing.
-        """
-        # Convolution layers
-        x = self.extract_features(inputs)
-        # Pooling and final linear layer
-        x = self._avg_pooling(x)
-#         if self._global_params.include_top:
-        x = x.flatten(start_dim=1)
-        x = self._dropout(x)
-        x = self._fc(x)
-        return x
-class MemoryEfficientSwish(nn.Module):
-    def forward(self, x):
-        return SwishImplementation.apply(x)
-class teacher_Headmodel(nn.Module):
-    def __init__(self,student_efficientnet=EfficientNet.from_pretrained('efficientnet-b7')):
-        super().__init__()
-        self._conv_stem = student_efficientnet._conv_stem
-        self._conv_stem.requires_grad = False
-        self._bn0 = student_efficientnet._bn0
-        self._swish = MemoryEfficientSwish()
-        self._blocks = student_efficientnet._blocks[:11]   
-    def set_swish(self, memory_efficient=True):
-        """Sets swish function as memory efficient (for training) or standard (for export).
-
-        Args:
-            memory_efficient (bool): Whether to use memory-efficient version of swish.
-        """
-        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
-        for block in self._blocks:
-            block.set_swish(memory_efficient)
-            
-    def extract_features(self, inputs):
-        """use convolution layer to extract feature .
-
-        Args:
-            inputs (tensor): Input tensor.
-
-        Returns:
-            Output of the final convolution
-            layer in the efficientnet model.
-        """
-        # Stem
-        x = self._swish(self._bn0(self._conv_stem(inputs)))
-
-        # Blocks
-        for idx, block in enumerate(self._blocks):
-            drop_connect_rate = 0.2
-            if drop_connect_rate:
-                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
-            x = block(x, drop_connect_rate=drop_connect_rate)
-
-        # print(x.shape) #torch.Size([1, 48, 150, 150]
-        return x
-       
-class Headmodel(nn.Module):
-    def __init__(self,student_efficientnet=EfficientNet.from_name('efficientnet-b0')):
-        super().__init__()
-        self.image_size = 600
-        self._conv_stem = student_efficientnet._conv_stem
-        self._conv_stem.requires_grad = False
-        self._bn0 = student_efficientnet._bn0
-        self._swish = MemoryEfficientSwish()
-        self._blocks = student_efficientnet._blocks[:2]
-        self.connect = nn.Conv2d(in_channels=24, out_channels=48, kernel_size=1, stride=1, padding=0)
-        
-    def set_swish(self, memory_efficient=True):
-        """Sets swish function as memory efficient (for training) or standard (for export).
-
-        Args:
-            memory_efficient (bool): Whether to use memory-efficient version of swish.
-        """
-        self._swish = MemoryEfficientSwish() if memory_efficient else Swish()
-        for block in self._blocks:
-            block.set_swish(memory_efficient)
-            
-    def extract_features(self, inputs):
-        """use convolution layer to extract feature .
-
-        Args:
-            inputs (tensor): Input tensor.
-
-        Returns:
-            Output of the final convolution
-            layer in the efficientnet model.
-        """
-        # Stem
-        x = self._swish(self._bn0(self._conv_stem(inputs)))
-
-        # Blocks
-        for idx, block in enumerate(self._blocks):
-            drop_connect_rate = 0.2
-            if drop_connect_rate:
-                drop_connect_rate *= float(idx) / len(self._blocks)  # scale drop connect_rate
-            x = block(x, drop_connect_rate=drop_connect_rate)
-#         print(x.shape) #[1, 24, 56, 56]
-        x = self.connect(x)
-        # x = x.repeat(1,1,2,2)
-        # x = x[:,:,:150,:150]
-        return x
-    
-    def forward(self, inputs):
-        """EfficientNet's forward function.
-           Calls extract_features to extract features, applies final linear layer, and returns logits.
-
-        Args:
-            inputs (tensor): Input tensor.
-
-        Returns:
-            Output of this model after processing.
-        """
-        # Convolution layers
-        x = self.extract_features(inputs)
-        return x
-
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-
-
-import os
-from torchvision.io import read_image
-IMG_EXTENSIONS = [
-    '.jpg', '.JPG', '.jpeg', '.JPEG',
-    '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
-]
-
-
-def is_image_file(filename):
-    return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
-
-
-def find_classes(dir):
-    classes = [d for d in os.listdir(dir) if os.path.isdir(os.path.join(dir, d))]
-    classes.sort()
-    class_to_idx = {classes[i]: i for i in range(len(classes))}
-    return classes, class_to_idx
-
-
-def make_dataset(dir, class_to_idx):
-    images = []
-    dir = os.path.expanduser(dir)
-    for target in sorted(os.listdir(dir)):
-        d = os.path.join(dir, target)
-        if not os.path.isdir(d):
-            continue
-
-        for root, _, fnames in sorted(os.walk(d)):
-            for fname in sorted(fnames):
-                if is_image_file(fname):
-                    path = os.path.join(root, fname)
-                    item = (path, class_to_idx[target])
-                    images.append(item)
-
-    return images
-
-
-def pil_loader(path):
-    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
-    with open(path, 'rb') as f:
-        with Image.open(f) as img:
-            return img.convert('RGB')
-
-
-def accimage_loader(path):
-    import accimage
-    try:
-        return accimage.Image(path)
-    except IOError:
-        # Potentially a decoding problem, fall back to PIL.Image
-        return pil_loader(path)
-
-
-def default_loader(path):
-    from torchvision import get_image_backend
-    if get_image_backend() == 'accimage':
-        return accimage_loader(path)
-    else:
-        return pil_loader(path)
-
-class KDImageDataset(datasets.ImageFolder):
-    def __init__(self, root, transform=None, target_transform=None,
-                 loader=default_loader):
-        classes, class_to_idx = find_classes(root)
-        imgs = make_dataset(root, class_to_idx)
-        if len(imgs) == 0:
-            raise(RuntimeError("Found 0 images in subfolders of: " + root + "\n"
-                               "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
-    
-        super().__init__(root)
-        self.root = root
-        self.imgs = imgs
-        self.classes = classes
-        self.class_to_idx = class_to_idx
-        self.transform = transform
-        self.loader = loader
-        self.targets = self.tensor_target()
-        self.target_transform = target_transform
-
-    def tensor_target(self):
-        imgs = self.imgs
-        targets = []
-        for i in imgs:
-            pth = i[0]
-            a = pth.find('train')
-            pth = pth[:a-1]+"_KD"+pth[a-1:-5]+'.pt'
-            targets.append(torch.load(pth))
-        self.targets = targets
-        return targets
-
-    def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-
-        Returns:
-            tuple: (image, target) where target is class_index of the target class.
-        """
-        path, target = self.imgs[index]
-        img = self.loader(path)
-        if self.transform is not None:
-            img = self.transform(img)
-        if self.target_transform is None:
-            a = path.find('train')
-            path = path[:a-1]+"_KD"+path[a-1:-5]+'.pt'
-            
-        return (img, path)
-
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -328,7 +37,7 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=64, type=int,
+parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -369,6 +78,7 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+
 best_acc1 = 0
 
 
@@ -432,8 +142,6 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> creating model '{}'".format(args.arch))
             model = EfficientNet.from_name(args.arch)
 
-    if "head" in args.arch:
-        model = Headmodel()
     else:
         if args.pretrained:
             print("=> using pre-trained model '{}'".format(args.arch))
@@ -472,7 +180,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.MSELoss().cuda(args.gpu)
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -511,10 +219,10 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         image_size = args.image_size
 
-    train_dataset = KDImageDataset(
-        root=traindir,
-        transform =transforms.Compose([
-            transforms.RandomResizedCrop(600),
+    train_dataset = datasets.ImageFolder(
+        traindir,
+        transforms.Compose([
+            transforms.RandomResizedCrop(image_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -585,37 +293,25 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     # switch to train mode
     model.train()
-    t = teacher_Headmodel()
-    t.eval()
+
     end = time.time()
-    
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
-        # head_target = t.extract_features(images)
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-        target_one = True
-        for target_pth in target:
-            if target_one:
-                target_tensor = torch.load(target_pth).unsqueeze(0)
-                target_one = False
-            else:
-                target_tensor = torch.cat((target_tensor, torch.load(target_pth).unsqueeze(0)), dim=0)
-    
-        target = target_tensor.cuda(args.gpu, non_blocking=True)
+        target = target.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(images)
         loss = criterion(output, target)
-        # output = tailnet(output)
 
         # measure accuracy and record loss
-        # acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images.size(0))
-        # top1.update(acc1[0], images.size(0))
-        # top5.update(acc5[0], images.size(0))
+        top1.update(acc1[0], images.size(0))
+        top5.update(acc5[0], images.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -640,15 +336,10 @@ def validate(val_loader, model, criterion, args):
 
     # switch to evaluate mode
     model.eval()
-    t = teacher_Headmodel()
-    t.eval()
-    # tailnet = Tailmodel()
-    # tailnet.eval()
 
     with torch.no_grad():
         end = time.time()
         for i, (images, target) in enumerate(val_loader):
-            target = t.extract_features(images)
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
             target = target.cuda(args.gpu, non_blocking=True)
@@ -658,10 +349,10 @@ def validate(val_loader, model, criterion, args):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            # acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
             losses.update(loss.item(), images.size(0))
-            # top1.update(acc1[0], images.size(0))
-            # top5.update(acc5[0], images.size(0))
+            top1.update(acc1[0], images.size(0))
+            top5.update(acc5[0], images.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -671,8 +362,8 @@ def validate(val_loader, model, criterion, args):
                 progress.print(i)
 
         # TODO: this should also be done with the ProgressMeter
-        # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-        #       .format(top1=top1, top5=top5))
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+              .format(top1=top1, top5=top5))
 
     return top1.avg
 
