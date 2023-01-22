@@ -75,23 +75,28 @@ tfms = transforms.Compose([transforms.Resize(image_size), transforms.CenterCrop(
 
 ori_dir = '/home/yenhsiu/dataset/ilsvrc2012'
 dst_dir = ori_dir + "_KD"
-if os.path.exists(dst_dir):
-    print("target file exists")
-else:
+if not os.path.exists(dst_dir):
     os.mkdir(dst_dir)
-    ori_dir_list = os.listdir(ori_dir)
-    for f in ori_dir_list:
-        if os.path.isdir(ori_dir+"/"+f):
+
+ori_dir_list = os.listdir(ori_dir) #train and val
+
+for f in ori_dir_list:
+    if os.path.isdir(ori_dir+"/"+f):
+        if not os.path.exists(ori_dir+"/"+f):
             os.mkdir(dst_dir+"/"+f)
-            ori_dir_label_list = os.listdir(ori_dir+"/"+f)
-            print(f)
-            for label in ori_dir_label_list:
+        ori_dir_label_list = os.listdir(ori_dir+"/"+f)
+        for label in ori_dir_label_list:
+            if not os.path.exists((dst_dir+"/"+f+"/"+label)):
                 os.mkdir(dst_dir+"/"+f+"/"+label)
-                ori_dir_img_list = os.listdir(ori_dir+"/"+f+"/"+label)
-                for imgname in ori_dir_img_list:
+            ori_dir_img_list = os.listdir(ori_dir+"/"+f+"/"+label)
+            for imgname in ori_dir_img_list:
+                if os.path.exists(dst_dir+"/"+f+"/"+label+"/"+imgname[:-5]+'.pt'):
+                    continue
+                else:
                     img = Image.open(ori_dir+"/"+f+"/"+label+"/"+imgname)
                     try:
                         img = tfms(img).unsqueeze(0)
+                        print("create "+dst_dir+"/"+f+"/"+label+"/"+imgname[:-5]+'.pt')
                         torch.save(t.extract_features(img), dst_dir+"/"+f+"/"+label+"/"+imgname[:-5]+'.pt')
                     except:
                         continue
